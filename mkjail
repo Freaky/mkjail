@@ -14,15 +14,16 @@
 #
 # Example usage:
 #
-#   mkjail /jail/ruby /usr/local/bin/ruby -e 'p "Hello"'
+#   mkjail ruby-jail.txz /usr/local/bin/ruby -e 'p "Hello"'
+#   tar xf ruby-jail.txz /jail/ruby
 #   chroot /jail/ruby /usr/local/bin/ruby -e 'p "Hello"'
 #
-# It's been tested successfully with Rails applications, PHP, Apache,
-# and various other tools.
+# Note you might want to exclude the device nodes and make a devfs.
+#
 
 require "set"
-require "fileutils"
 require "pathname"
+require "tempfile"
 
 BASEFILES = %w[
   /libexec/ld-elf.so.1
@@ -33,72 +34,53 @@ BASEFILES = %w[
 TRACETIME = "20s"
 
 def trace_cmd(cmd)
-  puts "Tracing #{cmd} for up to #{TRACETIME}"
-  tracefile = `mktemp -t mkjail-#{File.basename(cmd.first)}`.chomp + ".ktrace"
-  cmdargs = ["timeout", "20s", "ktrace", "-t", "n", "-if", tracefile, "--", *cmd]
-  puts cmdargs.inspect
+  puts "Tracing #{cmd.inspect} for up to #{TRACETIME}"
+  tracefile = Tempfile.new("mkjail")
+  cmdargs = ["timeout", "20s", "ktrace", "-t", "n", "-if", tracefile.path, "--", *cmd]
   system(*cmdargs)
-  puts "Trace saved tp #{tracefile}"
+  puts "Trace saved to #{tracefile.path}"
   tracefile
 end
 
 def detect_files(cmd)
   trace = trace_cmd(cmd)
   files = Set.new
-  File.popen(["kdump", "-sf", trace]) do |tr|
+  File.popen(["kdump", "-sf", trace.path]) do |tr|
     tr
       .each_line
       .map { |line| /(?<pid>\d+)\s+(?<cmd>\S+)\s+(?<type>\S+)\s+"(?<what>.*)"/.match(line) }
-      .select { |md| md && md[:type] == "NAMI" } # name lookups
-      .map { |md| md[:what] } # paths
-      .select { |path| path != "." && File.exist?(path) } # if they exist
-      .each { |path| files << path } # add to the list
+      .select { |md| md && md[:type] == "NAMI" }
+      .map { |md| md[:what] }
+      .select { |path| path != "." && File.exist?(path) }
+      .map { |path| Pathname.new(path) }
+      .each do |path|
+        path.descend do |fragment|
+          files << fragment.to_s
+          files << fragment.realpath.to_s if fragment.symlink?
+        end
+      end
   end
-  files.to_a.sort
+  files
 ensure
-  FileUtils.rm trace
+  trace.close
+  trace.unlink
 end
 
-def copy_path(source, dest)
-  source = Pathname.new(source)
-  dest = Pathname.new(dest)
-
-  source.descend do |path|
-    target = dest.join(path.relative_path_from("/"))
-    next if target.exist?
-    stat = path.lstat
-    if path.directory?
-      puts "DIR #{path}"
-      target.mkpath
-      target.lchmod(stat.mode)
-      target.lchown(stat.uid, stat.gid)
-    elsif !path.fnmatch?("/dev/*") && (path.file? || path.symlink?)
-      puts "FILE #{path}"
-      FileUtils.copy_entry(path, target)
-    else
-      puts "SKIP #{path.ftype} #{path}"
-    end
-  end
-end
-
-def copy_tree(files, dest)
-  files.each { |source| copy_path(source, dest) }
-end
-
-dest = ARGV.shift
-unless dest && File.directory?(dest)
-  warn "Usage: #{$0} /path/to/jail [command [args]]"
-  warn "Ensure the jail directory exists.  Don't forget to add devfs as required."
+dest, *cmd = ARGV
+unless dest && cmd.any?
+  warn "Usage: #{$0} archive command [args]"
   exit 1
 end
-cmd = ARGV
 
 files = detect_files(cmd)
-files += BASEFILES
+files.merge BASEFILES
 
-copy_tree(files, dest)
-
-File.open(File.join(dest, ".jail-manifest"), "w") do |f|
-  f.puts("# mkjail using command: #{cmd.inspect}")
-  f.puts files.join("\n")
+begin
+  tmp = Tempfile.new("mkjail")
+  tmp.write(files.sort.join("\000"))
+  tmp.flush
+  system "tar", "cvnaf", dest, "--totals", "--null", "-T", tmp.path
+ensure
+  tmp.close
+  tmp.unlink
 end
