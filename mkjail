@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
+
 #
 # Copyright (c) 2008-2020, Thomas Hurst <tom@hur.st>
 #
@@ -45,13 +46,13 @@ def detect_files(cmd)
   trace = trace_cmd(cmd)
   files = Set.new
   File.popen(["kdump", "-sf", trace]) do |tr|
-	  tr
+    tr
       .each_line
-      .map {|line| /(?<pid>\d+)\s+(?<cmd>\S+)\s+(?<type>\S+)\s+"(?<what>.*)"/.match(line) }
-      .select {|md| md && md[:type] == "NAMI" }          # name lookups
-      .map {|md| md[:what] }                             # paths
-      .select {|path| path != "." && File.exist?(path) } # if they exist
-      .each {|path| files << path }                      # add to the list
+      .map { |line| /(?<pid>\d+)\s+(?<cmd>\S+)\s+(?<type>\S+)\s+"(?<what>.*)"/.match(line) }
+      .select { |md| md && md[:type] == "NAMI" } # name lookups
+      .map { |md| md[:what] } # paths
+      .select { |path| path != "." && File.exist?(path) } # if they exist
+      .each { |path| files << path } # add to the list
   end
   files.to_a
 ensure
@@ -71,7 +72,7 @@ def copy_path(source, dest)
       target.mkpath
       target.lchmod(stat.mode)
       target.lchown(stat.uid, stat.gid)
-    elsif path.file? || path.symlink?
+    elsif !path.fnmatch?("/dev/*") && (path.file? || path.symlink?)
       puts "CP #{path}"
       FileUtils.copy_entry(path, target)
     else
@@ -81,7 +82,7 @@ def copy_path(source, dest)
 end
 
 def copy_tree(files, dest)
-   files.each { |source| copy_path(source, dest) }
+  files.each { |source| copy_path(source, dest) }
 end
 
 dest = ARGV.shift
