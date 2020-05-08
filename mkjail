@@ -21,8 +21,9 @@
 # Note you might want to exclude the device nodes and make a devfs.
 #
 
-require "set"
+require "mkmf"
 require "pathname"
+require "set"
 require "tempfile"
 
 BASEFILES = %w[
@@ -33,37 +34,37 @@ BASEFILES = %w[
 
 TRACETIME = "20s"
 
-def trace_cmd(cmd)
-  puts "Tracing #{cmd.inspect} for up to #{TRACETIME}"
-  tracefile = Tempfile.new("mkjail")
-  cmdargs = ["timeout", "20s", "ktrace", "-t", "n", "-if", tracefile.path, "--", *cmd]
-  system(*cmdargs)
-  puts "Trace saved to #{tracefile.path}"
-  tracefile
+def ktrace_nami(cmd)
+  warn " == TRACE #{cmd.join " "}"
+  warn " == TIMEOUT #{TRACETIME}"
+  Tempfile.new("mkjail-trace").tap do |trace|
+    trace.close
+    at_exit { trace.unlink }
+    system("timeout", TRACETIME, "ktrace", "-t", "n", "-if", trace.path, "--", *cmd)
+    warn " == EXIT #{$?.exitstatus}"
+  end
 end
 
-def detect_files(cmd)
-  trace = trace_cmd(cmd)
-  files = Set.new
-  File.popen(["kdump", "-sf", trace.path]) do |tr|
-    tr
-      .each_line
-      .map { |line| /(?<pid>\d+)\s+(?<cmd>\S+)\s+(?<type>\S+)\s+"(?<what>.*)"/.match(line) }
-      .select { |md| md && md[:type] == "NAMI" }
-      .map { |md| md[:what] }
-      .select { |path| path != "." && File.exist?(path) }
-      .map { |path| Pathname.new(path) }
-      .each do |path|
-        path.descend do |fragment|
-          files << fragment.to_s
-          files << fragment.realpath.to_s if fragment.symlink?
+def extract_files(ktrace)
+  Set.new.tap do |files|
+    File.popen(["kdump", "-sf", ktrace]) do |tr|
+      tr
+        .each_line # pid, procname, type, details
+        .map { |line| line.split(/\s+/, 4).drop(2) }
+        .select { |type, _| type == "NAMI" }
+        .map { |_, path| Pathname.new(path[1..-1]) }
+        .select { |path| path != "." && path.exist? }
+        .each do |path|
+          path.descend do |fragment|
+            files << fragment.to_s
+            begin
+              files << fragment.realpath.to_s if fragment.symlink?
+            rescue Errno::ENOENT, Errno::EACCES
+            end
+          end
         end
-      end
+    end
   end
-  files
-ensure
-  trace.close
-  trace.unlink
 end
 
 dest, *cmd = ARGV
@@ -72,15 +73,21 @@ unless dest && cmd.any?
   exit 1
 end
 
-files = detect_files(cmd)
-files.merge BASEFILES
+# Internal use only? pfft.
+path = MakeMakefile.find_executable0(cmd.first)
 
-begin
-  tmp = Tempfile.new("mkjail")
-  tmp.write(files.sort.join("\000"))
-  tmp.flush
-  system "tar", "cvnaf", dest, "--totals", "--null", "-T", tmp.path
-ensure
-  tmp.close
-  tmp.unlink
+if path.nil?
+  warn "Executable #{cmd.first} not in path"
+  exit 1
 end
+cmd[0] = path
+
+trace = ktrace_nami(cmd)
+files = extract_files(trace.path).merge(BASEFILES).add(path)
+
+plist = Tempfile.new("mkjail-files")
+at_exit { plist.unlink }
+plist.write(files.sort.join("\000"))
+plist.close
+system "tar", "cvnaf", dest, "--totals", "--null", "-T", plist.path
+exit $?.exitstatus
