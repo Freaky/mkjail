@@ -1,6 +1,7 @@
-#!/usr/local/bin/ruby
+#!/usr/bin/env ruby
+# frozen_string_literal: true
 #
-# Copyright (c) 2008, Thomas Hurst <tom@hur.st>
+# Copyright (c) 2008-2020, Thomas Hurst <tom@hur.st>
 #
 # Use of this file is unrestricted provided this notice is retained.
 # If you use it, it'd be nice if you dropped me a note.  Also beer.
@@ -20,87 +21,83 @@
 
 require "set"
 require "fileutils"
+require "pathname"
 
-Basefiles = %w[
+BASEFILES = %w[
   /libexec/ld-elf.so.1
   /etc/passwd
   /tmp
 ]
 
-def tracebin(bin)
-  warn "Test run of process, if it won't die by itself, please kill it shortly."
-  tracefile = `mktemp -t mkjail-#{File.basename(bin.first)}`.chomp + ".ktrace"
-  cmdargs = ["ktrace", "-t", "n", "-if", tracefile, "--", *bin]
-  warn cmdargs.inspect
+TRACETIME = "20s"
+
+def trace_cmd(cmd)
+  puts "Tracing #{cmd} for up to #{TRACETIME}"
+  tracefile = `mktemp -t mkjail-#{File.basename(cmd.first)}`.chomp + ".ktrace"
+  cmdargs = ["timeout", "20s", "ktrace", "-t", "n", "-if", tracefile, "--", *cmd]
+  puts cmdargs.inspect
   system(*cmdargs)
-  warn "Trace saved tp #{tracefile}"
+  puts "Trace saved tp #{tracefile}"
   tracefile
 end
 
-def detectfiles(bin)
-  trace = tracebin(bin)
+def detect_files(cmd)
+  trace = trace_cmd(cmd)
   files = Set.new
-  ofiles = []
-  File.popen("kdump -sf #{trace}") do |tr|
-    tr.each_line do |line|
-      line =~ /(\d+)\s+(\S+)\s+(\S+)\s+(.*)/
-      pid, cmd, type, what = $1, $2, $3, $4
-      what =~ /"(.*)"/
-      file = $1
-      if (type == "NAMI") && (file != ".") && File.exist?(file)
-        unless files.include?(file)
-          files << file
-          ofiles << file
-        end
-      end
-    end
+  File.popen(["kdump", "-sf", trace]) do |tr|
+	  tr
+      .each_line
+      .map {|line| /(?<pid>\d+)\s+(?<cmd>\S+)\s+(?<type>\S+)\s+"(?<what>.*)"/.match(line) }
+      .select {|md| md && md[:type] == "NAMI" }          # name lookups
+      .map {|md| md[:what] }                             # paths
+      .select {|path| path != "." && File.exist?(path) } # if they exist
+      .each {|path| files << path }                      # add to the list
   end
-  ofiles
+  files.to_a
+ensure
+  FileUtils.rm trace
 end
 
-def copytree(files, dest)
-  files.each do |source|
-    target = File.join(dest, source)
-    if File.size(source) > 67108864
-      puts "Skipping #{source}: > 64MB"
-      next
-    end
-    #  puts "#{source} => #{target}"
-    if File.file?(source)
-      dir = File.dirname(target)
-      puts "Making directory #{dir}"
-      FileUtils.makedirs(File.dirname(target))
-      begin
-        FileUtils.cp(source, target, verbose: true)
-      rescue => e
-        p e
-      end
-    elsif File.directory?(source)
-      mode = File.stat(source).mode
-      puts "Making directory #{target} mode #{mode.to_s(8)}"
-      FileUtils.makedirs(target)
-      FileUtils.chmod(mode, target)
+def copy_path(source, dest)
+  source = Pathname.new(source)
+  dest = Pathname.new(dest)
+
+  source.descend do |path|
+    target = dest.join(path.relative_path_from("/"))
+    next if target.exist?
+    stat = path.lstat
+    if path.directory?
+      puts "MKDIR #{target}"
+      target.mkpath
+      target.lchmod(stat.mode)
+      target.lchown(stat.uid, stat.gid)
+    elsif path.file? || path.symlink?
+      puts "CP #{path}"
+      FileUtils.copy_entry(path, target)
     else
-      puts "Skipping #{source}, not a regular file"
+      puts "SKIP #{path.ftype} #{path}"
     end
   end
+end
+
+def copy_tree(files, dest)
+   files.each { |source| copy_path(source, dest) }
 end
 
 dest = ARGV.shift
-unless File.directory?(dest)
-  puts "Usage: #{$0} /path/to/chroot [command [args]]"
-  puts "Ensure the chroot directory exists.  Don't forget to add devfs as required."
+unless dest && File.directory?(dest)
+  warn "Usage: #{$0} /path/to/jail [command [args]]"
+  warn "Ensure the jail directory exists.  Don't forget to add devfs as required."
   exit 1
 end
 cmd = ARGV
-warn "Tracing #{cmd.inspect}"
 
-files = detectfiles(cmd)
-# puts files.join("\n")
-files += Basefiles
+files = detect_files(cmd)
+files += BASEFILES
 
-copytree(files, dest)
-File.open(File.join(dest, "mkjail-manifest"), "w") do |f|
-  f.puts("mkjail using command: #{cmd.inspect}")
+copy_tree(files, dest)
+
+File.open(File.join(dest, ".jail-manifest"), "w") do |f|
+  f.puts("# mkjail using command: #{cmd.inspect}")
   f.puts files.join("\n")
 end
