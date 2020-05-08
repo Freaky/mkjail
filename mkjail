@@ -54,7 +54,7 @@ def detect_files(cmd)
       .select { |path| path != "." && File.exist?(path) } # if they exist
       .each { |path| files << path } # add to the list
   end
-  files.to_a
+  files.to_a.sort
 ensure
   FileUtils.rm trace
 end
@@ -68,12 +68,12 @@ def copy_path(source, dest)
     next if target.exist?
     stat = path.lstat
     if path.directory?
-      puts "MKDIR #{target}"
+      puts "DIR #{path}"
       target.mkpath
       target.lchmod(stat.mode)
       target.lchown(stat.uid, stat.gid)
     elsif !path.fnmatch?("/dev/*") && (path.file? || path.symlink?)
-      puts "CP #{path}"
+      puts "FILE #{path}"
       FileUtils.copy_entry(path, target)
     else
       puts "SKIP #{path.ftype} #{path}"
