@@ -8,9 +8,8 @@
 # If you use it, it'd be nice if you dropped me a note.  Also beer.
 #
 #
-# mkjail -- trace an executable, track dependent files, and
-#           attempt to produce a minimal functional tree capable
-#           of running it in a chroot/jail.
+# mkjail -- trace the execution of a command, track path lookups and
+#           generate an archive containing those paths.
 #
 # Example usage:
 #
@@ -21,7 +20,7 @@
 # Note you might want to exclude the device nodes and make a devfs.
 #
 
-require "mkmf"
+require "open3"
 require "pathname"
 require "set"
 require "tempfile"
@@ -73,13 +72,14 @@ unless dest && cmd.any?
   exit 1
 end
 
-# Internal use only? pfft.
-path = MakeMakefile.find_executable0(cmd.first)
+path, status = Open3.capture2("which", "--", cmd.first)
 
-if path.nil?
-  warn "Executable #{cmd.first} not in path"
+unless status.success?
+  warn "#{cmd.first} not found in PATH"
   exit 1
 end
+
+path.chomp!
 cmd[0] = path
 
 trace = ktrace_nami(cmd)
