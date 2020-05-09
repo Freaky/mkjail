@@ -21,6 +21,7 @@
 #
 
 require "open3"
+require "optparse"
 require "pathname"
 require "set"
 require "tempfile"
@@ -31,15 +32,17 @@ BASEFILES = %w[
   /tmp
 ]
 
-TRACETIME = "20s"
-
-def ktrace_nami(cmd)
+def ktrace_nami(cmd, timeout: nil)
   warn " == TRACE #{cmd.join " "}"
-  warn " == TIMEOUT #{TRACETIME}"
   Tempfile.new("mkjail-trace").tap do |trace|
     trace.close
     at_exit { trace.unlink }
-    system("timeout", TRACETIME, "ktrace", "-t", "n", "-if", trace.path, "--", *cmd)
+    cmd = ["ktrace", "-t", "n", "-if", trace.path, "--", *cmd]
+    if timeout
+      warn " == TIMEOUT #{timeout}" if timeout
+      cmd.unshift("timeout", timeout) if timeout
+    end
+    system(*cmd)
     warn " == EXIT #{$?.exitstatus}"
   end
 end
@@ -49,9 +52,9 @@ def extract_files(ktrace)
     File.popen(["kdump", "-sf", ktrace]) do |tr|
       tr
         .each_line # pid, procname, type, details
-        .map { |line| line.split(/\s+/, 4).drop(2) }
+        .map { |line| line.strip.split(/\s+/, 4).drop(2) }
         .select { |type, _| type == "NAMI" }
-        .map { |_, path| Pathname.new(path[1..-1]) }
+        .map { |_, path| Pathname.new(path[1..-2]) }
         .select { |path| path != "." && path.exist? }
         .each do |path|
           path.descend do |fragment|
@@ -66,9 +69,46 @@ def extract_files(ktrace)
   end
 end
 
-dest, *cmd = ARGV
-unless dest && cmd.any?
-  warn "Usage: #{$0} archive command [args]"
+options = Struct.new(:timeout, :archive, :list, :dir).new
+
+parser = OptionParser.new { |opts|
+  opts.banner = "Usage: #{$0} [options] [--] command [args]"
+  opts.on(
+    "-t", "--timeout DURATION", /\d+(?:\.\d+)?[smhd]?/,
+    "Timeout to run command in seconds, or number with [smhd] postfix"
+  ) do |arg|
+    options.timeout = arg
+  end
+
+  opts.on("-l", "--l [FILE]", "Create or print a list of files and directories") do |arg|
+    options.list = arg
+  end
+
+  opts.on("-a", "--archive FILE", "Create archive using tar(1), auto format") do |arg|
+    options.archive = arg
+  end
+
+  opts.on("-d", "--dir DIR", "Copy the file hierachy to a directory") do |arg|
+    options.dir = arg
+  end
+}
+
+cmd = []
+
+begin
+  parser.order!(ARGV) do |arg|
+    cmd << arg
+    break
+  end
+rescue OptionParser::ParseError
+  warn parser
+  exit 1
+end
+
+cmd += ARGV
+
+if cmd.empty?
+  warn parser
   exit 1
 end
 
@@ -82,12 +122,40 @@ end
 path.chomp!
 cmd[0] = path
 
-trace = ktrace_nami(cmd)
-files = extract_files(trace.path).merge(BASEFILES).add(path)
+trace = ktrace_nami(cmd, timeout: options.timeout)
+files = extract_files(trace.path).merge(BASEFILES).add(path).sort
 
-plist = Tempfile.new("mkjail-files")
-at_exit { plist.unlink }
-plist.write(files.sort.join("\000"))
-plist.close
-system "tar", "cvnaf", dest, "--totals", "--null", "-T", plist.path
-exit $?.exitstatus
+if options.list || !(options.archive || options.dir)
+  if String === options.list
+    warn " == LIST >#{options.list}"
+    IO.write(options.list, files.join("\n") + "\n")
+  else
+    warn " == LIST"
+    puts files
+  end
+end
+
+if options.dir
+  warn " == DIR #{options.dir}"
+  IO.popen(["cpio", "-pv", "--null", "--make-directories", options.dir], "w") do |cpio|
+    cpio.write(files.join("\000"))
+  end
+
+  unless $?.success?
+    warn "cpio exit #{$?.exitstatus}"
+    exit $?.exitstatus
+  end
+end
+
+if options.archive
+  warn " == ARCHIVE #{options.archive}"
+  plist = Tempfile.new("mkjail-files")
+  at_exit { plist.unlink }
+  plist.write(files.join("\000"))
+  plist.close
+  system "tar", "cvnaf", options.archive, "--totals", "--null", "-T", plist.path
+  unless $?.success?
+    warn "tar exit #{$?.exitstatus}"
+    exit $?.exitstatus
+  end
+end

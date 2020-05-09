@@ -1,27 +1,37 @@
 # NAME
 
-**mkjail** - make a minimal chroot/jail environment in an archive
+**mkjail** - make a minimal chroot/jail environment
 
 # SYNOPSIS
 
-`mkjail archive command [args]`
+`mkjail \[-t | --timeout DURATION] \[-a | --archive FILE] \[-d | --dir DIRECTORY] \[-l | --list \[FILE]] command \[args]
 
 # DESCRIPTION
 
-`mkjail` runs a given command for up to 20 seconds, tracking the filesystem name
-lookups it performs.  It then creates an archive from those files using `tar(1)`.
+`mkjail` runs a given command with an optional timeout, tracing any path
+lookups it performs in order to construct a list of dependent files, folders
+and devices.
 
-The resulting archive can be extracted anywhere on the filesystem, and used with
-`chroot(8)` or `jail(8)` to run the same command.  Probably.
+By default the list is printed to STDOUT, or it can be written to a file.
+
+The list can also be used to create an archive using `tar(1)` in any format its
+automatic creation mode supports, and it can be used to create a directory that
+should be ready to use as a `chroot(8)` or `jail(8)` environment.
 
 # EXAMPLE
 
 ```shell
--% mkjail ruby-jail.txz /usr/local/bin/ruby -e "puts 'Hello'"
-...
+-% mkjail -d ruby-jail /usr/local/bin/ruby -e "puts 'Hello'"
+ == TRACE /usr/local/bin/ruby -e puts 'Hello'
 Hello
+ == EXIT 0
+ == DIR ruby-jail
+ruby-jail/
+ruby-jail/dev
 ...
--% mkdir ruby-jail && tar xf ruby-jail.txz -C ruby-jail
--% sudo chroot ruby-jail /usr/local/bin/ruby -e "puts 'Chrooted!'"
-Chrooted!
+ruby-jail/var/run
+ruby-jail/var/run/ld-elf.so.hints
+14073 blocks
+-% sudo chroot ruby-jail /usr/local/bin/ruby -e "puts 'Hello'"
+Hello
 ```
