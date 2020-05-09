@@ -4,7 +4,7 @@
 
 # SYNOPSIS
 
-`mkjail \[-t | --timeout DURATION] \[-a | --archive FILE] \[-d | --dir DIRECTORY] \[-l | --list \[FILE]] command \[args]
+`mkjail` \[-t | --timeout DURATION] \[-a | --archive FILE] \[-d | --dir DIRECTORY] \[-l | --list \[FILE]] command \[args]
 
 # DESCRIPTION
 
@@ -12,7 +12,8 @@
 lookups it performs in order to construct a list of dependent files, folders
 and devices.
 
-By default the list is printed to STDOUT, or it can be written to a file.
+By default the list is printed to stdout, but the `-l` argument allows a file to
+be specified.
 
 The list can also be used to create an archive using `tar(1)` in any format its
 automatic creation mode supports, and it can be used to create a directory that
